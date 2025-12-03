@@ -6,11 +6,17 @@ const { pool } = require("../../db");
 // =====================================================
 exports.registrarMensajeEntrante = async (req, res) => {
   try {
-    console.log("📩 WEBHOOK RECIBIDO CRM RAW:", JSON.stringify(req.body, null, 2));
+    console.log(
+      "📩 WEBHOOK RECIBIDO CRM RAW:",
+      JSON.stringify(req.body, null, 2)
+    );
 
-    // Evolution manda: { event, instanceId, data: { ... } }
+    // Evolution puede mandar:
+    // { event, instanceId, data: {...}, sender, ... }
+    // o bien: { result: { event, instanceId, data: {...} }, sender, ... }
     const raw = req.body;
-    const data = raw.data || raw; // Soportamos Evolution y también Postman
+    const wrapper = raw.result || raw; // 👈 soporta ambos formatos
+    const data = wrapper.data || wrapper;
 
     // -------------------------------
     // 1) Normalizar teléfono
@@ -20,7 +26,8 @@ exports.registrarMensajeEntrante = async (req, res) => {
       data.remoteJID ||
       data.from ||
       (data.key && data.key.remoteJid) ||
-      raw.sender || // en tu log viene aquí: "sender": "1829...@s.whatsapp.net"
+      wrapper.sender || // en tus logs viene aquí
+      raw.sender ||
       null;
 
     let telefono = data.phone || data.telefono || null;
@@ -47,7 +54,6 @@ exports.registrarMensajeEntrante = async (req, res) => {
     // 2) Normalizar mensaje y archivo
     // -------------------------------
     let mensaje =
-      data.message ||
       data.text ||
       data.body ||
       (data.data && data.data.text) ||
@@ -55,18 +61,20 @@ exports.registrarMensajeEntrante = async (req, res) => {
 
     let archivoUrl = null;
 
-    // muchos Evolution mandan un array messages
-    if (!mensaje && Array.isArray(data.messages) && data.messages.length > 0) {
-      const m = data.messages[0];
-      mensaje =
-        m.text?.body ||
-        m.conversation ||
-        m.message ||
-        m.body ||
-        null;
+    // Objeto de mensaje principal (según formato Evolution/Baileys)
+    let msgPrimary = null;
 
-      if (!remoteJid && m.key?.remoteJid) {
-        remoteJid = m.key.remoteJid;
+    if (data.message) {
+      msgPrimary = data.message;
+    } else if (
+      Array.isArray(data.messages) &&
+      data.messages.length > 0 &&
+      data.messages[0].message
+    ) {
+      msgPrimary = data.messages[0].message;
+      // por si también viene remoteJid ahí
+      if (!remoteJid && data.messages[0].key?.remoteJid) {
+        remoteJid = data.messages[0].key.remoteJid;
         telefono = remoteJid.replace(/@.*/, "");
         if (telefono.length === 11 && telefono.startsWith("1")) {
           telefono = telefono.substring(1);
@@ -74,41 +82,40 @@ exports.registrarMensajeEntrante = async (req, res) => {
       }
     }
 
-    // FORMATO ESTRUCTURADO: data.message.{conversation, extendedTextMessage, audioMessage, imageMessage, documentMessage...}
-    if (data.message) {
-      const msg = data.message;
+    // Texto puro: conversation / extendedTextMessage
+    if (!mensaje && msgPrimary?.conversation) {
+      mensaje = msgPrimary.conversation;
+    }
+    if (!mensaje && msgPrimary?.extendedTextMessage?.text) {
+      mensaje = msgPrimary.extendedTextMessage.text;
+    }
 
-      // texto directo
-      if (!mensaje && msg.conversation) {
-        mensaje = msg.conversation;
+    // 🖼️ Imagen
+    if (msgPrimary?.imageMessage) {
+      archivoUrl = msgPrimary.imageMessage.url || null;
+      const caption = msgPrimary.imageMessage.caption;
+      if (!mensaje) {
+        mensaje = caption || "[Imagen de WhatsApp]";
       }
+    }
 
-      // texto extendido
-      if (!mensaje && msg.extendedTextMessage?.text) {
-        mensaje = msg.extendedTextMessage.text;
-      }
-
-      // 🎧 AUDIO
-      if (!mensaje && msg.audioMessage) {
-        archivoUrl = msg.audioMessage.url || null;
-        const segundos = msg.audioMessage.seconds;
-        const caption = msg.audioMessage.caption;
+    // 🎧 Audio
+    if (msgPrimary?.audioMessage) {
+      archivoUrl = msgPrimary.audioMessage.url || null;
+      const segundos = msgPrimary.audioMessage.seconds;
+      const caption = msgPrimary.audioMessage.caption;
+      if (!mensaje) {
         mensaje =
           caption ||
           `[Audio de WhatsApp${segundos ? ` - ${segundos}s` : ""}]`;
       }
+    }
 
-      // 🖼️ IMAGEN
-      if (!mensaje && msg.imageMessage) {
-        archivoUrl = msg.imageMessage.url || null;
-        const caption = msg.imageMessage.caption;
-        mensaje = caption || `[Imagen de WhatsApp]`;
-      }
-
-      // 📎 DOCUMENTO
-      if (!mensaje && msg.documentMessage) {
-        archivoUrl = msg.documentMessage.url || null;
-        const fileName = msg.documentMessage.fileName;
+    // 📎 Documento
+    if (msgPrimary?.documentMessage) {
+      archivoUrl = msgPrimary.documentMessage.url || null;
+      const fileName = msgPrimary.documentMessage.fileName;
+      if (!mensaje) {
         mensaje = `[Documento: ${fileName || "Archivo"}]`;
       }
     }
@@ -130,6 +137,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
     console.log("📎 ARCHIVO URL:", archivoUrl);
     console.log("🙋 NOMBRE:", pushName);
 
+    // si aún no pudimos sacar teléfono o mensaje, ignoramos
     if (!telefono || !mensaje) {
       console.log("⚠️ Webhook ignorado: falta teléfono o mensaje.");
       return res.status(200).json({ ok: true, ignored: true });
