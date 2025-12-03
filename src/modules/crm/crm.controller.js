@@ -3,78 +3,82 @@ const { pool } = require("../../db");
 
 // =====================================================
 // 1. WEBHOOK: mensaje entrante desde Evolution / WhatsApp
-//    VERSIÓN SUPER SIMPLE PARA DEBUG
 // =====================================================
 exports.registrarMensajeEntrante = async (req, res) => {
   try {
-    console.log("🆕 [CRM v2] WEBHOOK RECIBIDO:");
-    console.log(JSON.stringify(req.body, null, 2));
+    console.log("🆕 [CRM v2] WEBHOOK RECIBIDO");
+    // console.log(JSON.stringify(req.body, null, 2)); // deja esto si quieres debug
 
-    const raw = req.body;
+    const raw = req.body || {};
     const data = raw.data || {};
 
     // ==========================
+    // 0) EVENTO SIN MENSAJE (solo status, delivery, etc.)
+    // ==========================
+    if (!data.message) {
+      console.log("ℹ️ [CRM v2] Evento sin objeto message (solo status/ACK). Ignorado.");
+      return res.status(200).json({ ok: true, ignored: true, reason: "no_message_object" });
+    }
+
+    // ==========================
     // 1) TELEFONO
-    //    Ejemplo que mandaste:
+    //    Ejemplo:
     //    data.key.remoteJid = "18295319442@s.whatsapp.net"
     // ==========================
-    let remoteJid = null;
-    if (data.key && data.key.remoteJid) {
-      remoteJid = data.key.remoteJid;
-    } else if (raw.sender) {
-      // fallback: quien envía el webhook
-      remoteJid = raw.sender;
-    }
+    let remoteJid = data.key?.remoteJid || raw.sender || null;
 
     let telefono = null;
     if (remoteJid) {
-      telefono = remoteJid.replace(/@.*/, ""); // corta @s.whatsapp.net
-    }
-
-    // si viene 1829XXXXXXX lo dejamos así o quitamos el 1
-    if (telefono && telefono.length === 11 && telefono.startsWith("1")) {
-      telefono = telefono.substring(1);
+      // corta @s.whatsapp.net
+      telefono = remoteJid.replace(/@.*/, "");
+      // si viene 1829XXXXXXX le quitamos el 1
+      if (telefono.length === 11 && telefono.startsWith("1")) {
+        telefono = telefono.substring(1);
+      }
     }
 
     // ==========================
     // 2) MENSAJE
-    //    De tus ejemplos:
-    //    data.message.conversation = "Hola"
     // ==========================
+    const msg = data.message || {};
     let mensaje = null;
 
-    if (data.message && data.message.conversation) {
-      mensaje = data.message.conversation;
-    } else if (data.message && data.message.extendedTextMessage?.text) {
-      mensaje = data.message.extendedTextMessage.text;
-    }
-
-    // Audio básico
-    if (!mensaje && data.message && data.message.audioMessage) {
+    if (msg.conversation) {
+      mensaje = msg.conversation;
+    } else if (msg.extendedTextMessage?.text) {
+      mensaje = msg.extendedTextMessage.text;
+    } else if (msg.imageMessage?.caption) {
+      mensaje = msg.imageMessage.caption;
+    } else if (msg.videoMessage?.caption) {
+      mensaje = msg.videoMessage.caption;
+    } else if (msg.audioMessage) {
       mensaje = "[Audio de WhatsApp]";
+    } else if (msg.documentMessage) {
+      mensaje = msg.documentMessage.caption || "[Documento de WhatsApp]";
     }
 
     console.log("👉 [CRM v2] remoteJid:", remoteJid);
     console.log("👉 [CRM v2] TELEFONO:", telefono);
     console.log("👉 [CRM v2] MENSAJE:", mensaje);
 
+    // Si no hay datos suficientes, lo ignoramos tranquilo (sin warning feo)
     if (!telefono || !mensaje) {
-      console.log("⚠️ [CRM v2] Webhook ignorado: falta teléfono o mensaje.");
-      return res.status(200).json({ ok: true, ignored: true });
+      console.log("ℹ️ [CRM v2] No se pudo extraer teléfono o mensaje. Evento ignorado.");
+      return res.status(200).json({
+        ok: true,
+        ignored: true,
+        reason: "missing_phone_or_message",
+      });
     }
 
     // ==========================
     // 3) waMessageId / nombre
     // ==========================
-    const waMessageId =
-      data.id ||
-      (data.key && data.key.id) ||
-      null;
-
+    const waMessageId = data.id || data.key?.id || null;
     const pushName = data.pushName || "Cliente WhatsApp";
 
     // =====================================================
-    // 4) GUARDAR EN BD (MISMA LÓGICA DE ANTES)
+    // 4) GUARDAR EN BD
     // =====================================================
     const client = await pool.connect();
     try {
