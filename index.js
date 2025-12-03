@@ -1,9 +1,11 @@
 require('dotenv').config();
-const app = require('./src/app');
 
-const PORT = process.env.PORT || 5000
-;
+// Importamos app + server desde app.js
+const { app, server } = require('./src/app');
 
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor FULLPOS API corriendo en puerto ${PORT}`);
+const PORT = process.env.PORT || 5000;
+
+// IMPORTANTE: ahora usamos server.listen, no app.listen
+server.listen(PORT, () => {
+  console.log(`🚀 FULLPOS API + Socket.IO corriendo en puerto ${PORT}`);
 });
