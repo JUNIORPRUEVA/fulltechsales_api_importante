@@ -12,6 +12,27 @@ exports.registrarMensajeEntrante = async (req, res) => {
     const raw = req.body || {};
     const data = raw.data || {};
 
+    const messageType = data.messageType;
+    const message = data.message || {};
+
+    // ==========================
+    // 0) DESCARTAR EVENTOS QUE NO NOS INTERESAN
+    //    - reacciones
+    //    - mensajes de sistema / protocolos
+    //    - eventos sin "message" útil
+    // ==========================
+    const tiposIgnorados = [
+      "reactionMessage",
+      "protocolMessage",
+      "senderKeyDistributionMessage",
+      "messageStatus",
+    ];
+
+    if (!message || tiposIgnorados.includes(messageType)) {
+      console.log("ℹ️ [CRM v2] Evento sin contenido útil (reacción/sistema). Ignorado.");
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
     // ==========================
     // 1) TELEFONO (remoteJid / sender)
     // ==========================
@@ -20,14 +41,25 @@ exports.registrarMensajeEntrante = async (req, res) => {
     if (data.key && data.key.remoteJid) {
       remoteJid = data.key.remoteJid;
     } else if (raw.sender) {
-      // fallback: quién envía el webhook
-      remoteJid = raw.sender;
+      remoteJid = raw.sender; // fallback
+    }
+
+    // Ignorar grupos y status broadcast
+    if (
+      remoteJid &&
+      (remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast")
+    ) {
+      console.log("ℹ️ [CRM v2] Mensaje de grupo/broadcast. Ignorado.");
+      return res.status(200).json({ ok: true, ignored: true });
     }
 
     let telefono = null;
     if (remoteJid) {
       // "18295319442@s.whatsapp.net" -> "18295319442"
+      // "8294770756@c.us"          -> "8294770756"
       telefono = remoteJid.replace(/@.*/, "");
+      // quitamos todo lo que no sea número por si acaso
+      telefono = telefono.replace(/[^0-9]/g, "");
     }
 
     // Si viene 1829XXXXXXX quitamos el 1 inicial
@@ -35,53 +67,42 @@ exports.registrarMensajeEntrante = async (req, res) => {
       telefono = telefono.substring(1); // 829XXXXXXX
     }
 
+    if (!telefono) {
+      console.log("ℹ️ [CRM v2] Evento sin teléfono válido. Ignorado.");
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
     // ==========================
-    // 2) MENSAJE (texto, extendido, audio, etc.)
+    // 2) MENSAJE (texto, extendido, media, audio)
     // ==========================
     let mensaje = null;
 
-    if (data.message) {
+    if (message.conversation) {
       // Texto normal
-      if (data.message.conversation) {
-        mensaje = data.message.conversation;
-      }
-      // Texto extendido (respuestas citadas, etc.)
-      else if (data.message.extendedTextMessage?.text) {
-        mensaje = data.message.extendedTextMessage.text;
-      }
-      // Imagen con caption
-      else if (data.message.imageMessage?.caption) {
-        mensaje = data.message.imageMessage.caption;
-      }
-      // Video con caption
-      else if (data.message.videoMessage?.caption) {
-        mensaje = data.message.videoMessage.caption;
-      }
-      // Documento con caption
-      else if (data.message.documentMessage?.caption) {
-        mensaje = data.message.documentMessage.caption;
-      }
-      // Audio
-      else if (data.message.audioMessage) {
-        mensaje = "[Audio de WhatsApp]";
-      }
+      mensaje = message.conversation;
+    } else if (message.extendedTextMessage?.text) {
+      // Texto extendido (quotes, respuestas, etc.)
+      mensaje = message.extendedTextMessage.text;
+    } else if (message.imageMessage?.caption) {
+      mensaje = message.imageMessage.caption || "[Imagen]";
+    } else if (message.videoMessage?.caption) {
+      mensaje = message.videoMessage.caption || "[Video]";
+    } else if (message.documentMessage?.caption) {
+      mensaje = message.documentMessage.caption || "[Documento]";
+    } else if (message.audioMessage) {
+      mensaje = "[Audio de WhatsApp]";
     }
 
-    // Si por alguna razón no hay texto ni tipo reconocible,
-    // igual ponemos algo para que no rompa nada.
-    const mensajeFinal = mensaje || "[Evento sin texto]";
+    if (!mensaje || typeof mensaje !== "string" || mensaje.trim() === "") {
+      console.log("ℹ️ [CRM v2] Mensaje sin texto interpretable. Ignorado.");
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
+    const mensajeFinal = mensaje.trim();
 
     console.log("👉 [CRM v2] remoteJid:", remoteJid);
     console.log("👉 [CRM v2] TELEFONO:", telefono);
     console.log("👉 [CRM v2] MENSAJE:", mensajeFinal);
-
-    // ==========================
-    // 2.1 Caso sin teléfono: ignorar silencioso
-    // ==========================
-    if (!telefono) {
-      console.log("ℹ️ [CRM v2] Evento sin teléfono (status/ACK/sistema). Ignorado.");
-      return res.status(200).json({ ok: true, ignored: true });
-    }
 
     // ==========================
     // 3) waMessageId / nombre
@@ -167,8 +188,8 @@ exports.registrarMensajeEntrante = async (req, res) => {
       // 4.3 Insertar mensaje
       await client.query(
         `INSERT INTO crm_mensajes
-         (conversacion_id, telefono, cuerpo, tipo, origen, wa_message_id, archivo_url)
-         VALUES ($1, $2, $3, 'IN', 'whatsapp', $4, $5)`,
+         (conversacion_id, telefono, cuerpo, tipo, origen, wa_message_id, archivo_url, fecha)
+         VALUES ($1, $2, $3, 'IN', 'whatsapp', $4, $5, NOW())`,
         [conversacionId, telefono, mensajeFinal, waMessageId, null]
       );
 
@@ -264,8 +285,8 @@ exports.enviarMensaje = async (req, res) => {
 
       const insertMsg = await client.query(
         `INSERT INTO crm_mensajes
-         (conversacion_id, telefono, cuerpo, tipo, origen)
-         VALUES ($1, $2, $3, 'OUT', $4)
+         (conversacion_id, telefono, cuerpo, tipo, origen, fecha)
+         VALUES ($1, $2, $3, 'OUT', $4, NOW())
          RETURNING *`,
         [conversacion_id, telefono, mensaje, origen || "crm_app"]
       );
