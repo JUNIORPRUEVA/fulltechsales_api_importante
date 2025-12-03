@@ -3,160 +3,84 @@ const { pool } = require("../../db");
 
 // =====================================================
 // 1. WEBHOOK: mensaje entrante desde Evolution / WhatsApp
+//    VERSIÓN SUPER SIMPLE PARA DEBUG
 // =====================================================
 exports.registrarMensajeEntrante = async (req, res) => {
   try {
-    console.log(
-      "📩 WEBHOOK RECIBIDO CRM RAW:",
-      JSON.stringify(req.body, null, 2)
-    );
+    console.log("🆕 [CRM v2] WEBHOOK RECIBIDO:");
+    console.log(JSON.stringify(req.body, null, 2));
 
     const raw = req.body;
+    const data = raw.data || {};
 
-    // Evolution te está mandando:
-    // {
-    //   event: "messages.upsert",
-    //   instance: "fulltech",
-    //   data: { key: { remoteJid }, pushName, message, ... },
-    //   sender: "1829xxxxxxxx@s.whatsapp.net",
-    //   ...
-    // }
-    //
-    // Pero dejamos flexible por si mañana cambia algo.
-    let data =
-      raw.data ||
-      (raw.result && raw.result.data) ||
-      raw; // fallback paranoico
-
-    // -------------------------------
-    // 1) Normalizar teléfono
-    // -------------------------------
-    let remoteJid =
-      data.remoteJid ||
-      data.remoteJID ||
-      data.from ||
-      (data.key && data.key.remoteJid) ||
-      raw.sender ||
-      null;
-
-    let telefono = data.phone || data.telefono || null;
-
-    if (!telefono && remoteJid) {
-      telefono = remoteJid.replace(/@.*/, ""); // quita @s.whatsapp.net
+    // ==========================
+    // 1) TELEFONO
+    //    Ejemplo que mandaste:
+    //    data.key.remoteJid = "18295319442@s.whatsapp.net"
+    // ==========================
+    let remoteJid = null;
+    if (data.key && data.key.remoteJid) {
+      remoteJid = data.key.remoteJid;
+    } else if (raw.sender) {
+      // fallback: quien envía el webhook
+      remoteJid = raw.sender;
     }
 
-    // Si viene con 11 dígitos tipo 1829XXXXXXX, puedes:
-    // - mantener 11 (formato internacional)
-    // - o quitar el "1" para guardar 10 dígitos (829XXXXXXX)
-    // Por ahora dejamos igual que antes: quitar el 1 inicial
+    let telefono = null;
+    if (remoteJid) {
+      telefono = remoteJid.replace(/@.*/, ""); // corta @s.whatsapp.net
+    }
+
+    // si viene 1829XXXXXXX lo dejamos así o quitamos el 1
     if (telefono && telefono.length === 11 && telefono.startsWith("1")) {
       telefono = telefono.substring(1);
     }
 
-    // -------------------------------
-    // 2) Normalizar mensaje + archivo
-    // -------------------------------
-    let mensaje =
-      data.text ||
-      data.body ||
-      (data.data && data.data.text) ||
-      null;
+    // ==========================
+    // 2) MENSAJE
+    //    De tus ejemplos:
+    //    data.message.conversation = "Hola"
+    // ==========================
+    let mensaje = null;
 
-    let archivoUrl = null;
-
-    // Mensaje "principal"
-    let msgPrimary = null;
-
-    if (data.message) {
-      // caso típico: data.message = { conversation: "Hola", ... }
-      msgPrimary = data.message;
-    } else if (
-      Array.isArray(data.messages) &&
-      data.messages.length > 0
-    ) {
-      // algunos formatos traen data.messages[0].message
-      msgPrimary = data.messages[0].message || data.messages[0];
-      if (!remoteJid && data.messages[0].key?.remoteJid) {
-        remoteJid = data.messages[0].key.remoteJid;
-        telefono = remoteJid.replace(/@.*/, "");
-        if (telefono.length === 11 && telefono.startsWith("1")) {
-          telefono = telefono.substring(1);
-        }
-      }
+    if (data.message && data.message.conversation) {
+      mensaje = data.message.conversation;
+    } else if (data.message && data.message.extendedTextMessage?.text) {
+      mensaje = data.message.extendedTextMessage.text;
     }
 
-    // Texto normal
-    if (!mensaje && msgPrimary?.conversation) {
-      mensaje = msgPrimary.conversation;
-    }
-    if (!mensaje && msgPrimary?.extendedTextMessage?.text) {
-      mensaje = msgPrimary.extendedTextMessage.text;
+    // Audio básico
+    if (!mensaje && data.message && data.message.audioMessage) {
+      mensaje = "[Audio de WhatsApp]";
     }
 
-    // Imagen
-    if (msgPrimary?.imageMessage) {
-      archivoUrl = msgPrimary.imageMessage.url || null;
-      const caption = msgPrimary.imageMessage.caption;
-      if (!mensaje) {
-        mensaje = caption || "[Imagen de WhatsApp]";
-      }
-    }
+    console.log("👉 [CRM v2] remoteJid:", remoteJid);
+    console.log("👉 [CRM v2] TELEFONO:", telefono);
+    console.log("👉 [CRM v2] MENSAJE:", mensaje);
 
-    // Audio
-    if (msgPrimary?.audioMessage) {
-      archivoUrl = msgPrimary.audioMessage.url || null;
-      const segundos = msgPrimary.audioMessage.seconds;
-      const caption = msgPrimary.audioMessage.caption;
-      if (!mensaje) {
-        mensaje =
-          caption ||
-          `[Audio de WhatsApp${segundos ? ` - ${segundos}s` : ""}]`;
-      }
-    }
-
-    // Documento
-    if (msgPrimary?.documentMessage) {
-      archivoUrl = msgPrimary.documentMessage.url || null;
-      const fileName = msgPrimary.documentMessage.fileName;
-      if (!mensaje) {
-        mensaje = `[Documento: ${fileName || "Archivo"}]`;
-      }
-    }
-
-    const waMessageId =
-      data.messageId ||
-      data.id ||
-      (Array.isArray(data.messages) && data.messages[0]?.key?.id) ||
-      null;
-
-    const pushName =
-      data.pushName ||
-      data.name ||
-      (Array.isArray(data.messages) && data.messages[0]?.pushName) ||
-      null;
-
-    console.log("🔍 remoteJid bruto:", remoteJid);
-    console.log("📞 TELEFONO NORMALIZADO:", telefono);
-    console.log("💬 MENSAJE NORMALIZADO:", mensaje);
-    console.log("📎 ARCHIVO URL:", archivoUrl);
-    console.log("🙋 NOMBRE:", pushName);
-
-    // Si NO hay teléfono o NO hay mensaje → no hacemos nada
     if (!telefono || !mensaje) {
-      console.log("⚠️ Webhook ignorado: falta teléfono o mensaje.");
+      console.log("⚠️ [CRM v2] Webhook ignorado: falta teléfono o mensaje.");
       return res.status(200).json({ ok: true, ignored: true });
     }
 
+    // ==========================
+    // 3) waMessageId / nombre
+    // ==========================
+    const waMessageId =
+      data.id ||
+      (data.key && data.key.id) ||
+      null;
+
+    const pushName = data.pushName || "Cliente WhatsApp";
+
     // =====================================================
-    // INICIAR TRANSACCIÓN
+    // 4) GUARDAR EN BD (MISMA LÓGICA DE ANTES)
     // =====================================================
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
 
-      // --------------------------------------
-      // 3) Buscar o crear cliente por teléfono
-      // --------------------------------------
+      // 4.1 Buscar o crear cliente
       const clienteRes = await client.query(
         "SELECT id, nombre FROM clientes WHERE telefono = $1 LIMIT 1",
         [telefono]
@@ -172,7 +96,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NULL, false)
            RETURNING id, nombre`,
           [
-            pushName || "Cliente WhatsApp",
+            pushName,
             telefono,
             null,
             null,
@@ -189,9 +113,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
         nombreCliente = clienteRes.rows[0].nombre;
       }
 
-      // --------------------------------------
-      // 4) Buscar o crear conversación
-      // --------------------------------------
+      // 4.2 Buscar o crear conversación
       const convRes = await client.query(
         "SELECT id FROM crm_conversaciones WHERE telefono = $1 LIMIT 1",
         [telefono]
@@ -222,29 +144,27 @@ exports.registrarMensajeEntrante = async (req, res) => {
         );
       }
 
-      // --------------------------------------
-      // 5) Insertar mensaje en historial
-      // --------------------------------------
+      // 4.3 Insertar mensaje
       await client.query(
         `INSERT INTO crm_mensajes
          (conversacion_id, telefono, cuerpo, tipo, origen, wa_message_id, archivo_url)
          VALUES ($1, $2, $3, 'IN', 'whatsapp', $4, $5)`,
-        [conversacionId, telefono, mensaje, waMessageId, archivoUrl]
+        [conversacionId, telefono, mensaje, waMessageId, null]
       );
 
       await client.query("COMMIT");
 
-      console.log("✅ Mensaje IN guardado en CRM");
+      console.log("✅ [CRM v2] Mensaje IN guardado en CRM");
       return res.json({ ok: true });
     } catch (err) {
       await client.query("ROLLBACK");
-      console.error("🔥 Error en registrarMensajeEntrante:", err);
+      console.error("🔥 [CRM v2] Error en registrarMensajeEntrante:", err);
       return res.status(500).json({ ok: false, error: "Error interno" });
     } finally {
       client.release();
     }
   } catch (err) {
-    console.error("🔥 Error general en webhook CRM:", err);
+    console.error("🔥 [CRM v2] Error general en webhook CRM:", err);
     return res.status(500).json({ ok: false, error: "Error general" });
   }
 };
