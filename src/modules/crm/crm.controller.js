@@ -8,9 +8,9 @@ exports.registrarMensajeEntrante = async (req, res) => {
   try {
     console.log("📩 WEBHOOK RECIBIDO CRM RAW:", JSON.stringify(req.body, null, 2));
 
-    // Evolution normalmente manda { event, instanceId, data: { ... } }
+    // Evolution manda: { event, instanceId, data: { ... } }
     const raw = req.body;
-    const data = raw.data || raw; // 👈 Soportamos Evolution y Postman
+    const data = raw.data || raw; // Soportamos Evolution y también Postman
 
     // -------------------------------
     // 1) Normalizar teléfono
@@ -20,6 +20,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
       data.remoteJID ||
       data.from ||
       (data.key && data.key.remoteJid) ||
+      raw.sender || // en tu log viene aquí: "sender": "1829...@s.whatsapp.net"
       null;
 
     let telefono = data.phone || data.telefono || null;
@@ -43,7 +44,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
     }
 
     // -------------------------------
-    // 2) Normalizar texto del mensaje
+    // 2) Normalizar mensaje y archivo
     // -------------------------------
     let mensaje =
       data.message ||
@@ -51,6 +52,8 @@ exports.registrarMensajeEntrante = async (req, res) => {
       data.body ||
       (data.data && data.data.text) ||
       null;
+
+    let archivoUrl = null;
 
     // muchos Evolution mandan un array messages
     if (!mensaje && Array.isArray(data.messages) && data.messages.length > 0) {
@@ -61,14 +64,53 @@ exports.registrarMensajeEntrante = async (req, res) => {
         m.message ||
         m.body ||
         null;
+
+      if (!remoteJid && m.key?.remoteJid) {
+        remoteJid = m.key.remoteJid;
+        telefono = remoteJid.replace(/@.*/, "");
+        if (telefono.length === 11 && telefono.startsWith("1")) {
+          telefono = telefono.substring(1);
+        }
+      }
     }
 
-    // otros formatos típicos
-    if (!mensaje && data.message?.conversation) {
-      mensaje = data.message.conversation;
-    }
-    if (!mensaje && data.message?.extendedTextMessage?.text) {
-      mensaje = data.message.extendedTextMessage.text;
+    // FORMATO ESTRUCTURADO: data.message.{conversation, extendedTextMessage, audioMessage, imageMessage, documentMessage...}
+    if (data.message) {
+      const msg = data.message;
+
+      // texto directo
+      if (!mensaje && msg.conversation) {
+        mensaje = msg.conversation;
+      }
+
+      // texto extendido
+      if (!mensaje && msg.extendedTextMessage?.text) {
+        mensaje = msg.extendedTextMessage.text;
+      }
+
+      // 🎧 AUDIO
+      if (!mensaje && msg.audioMessage) {
+        archivoUrl = msg.audioMessage.url || null;
+        const segundos = msg.audioMessage.seconds;
+        const caption = msg.audioMessage.caption;
+        mensaje =
+          caption ||
+          `[Audio de WhatsApp${segundos ? ` - ${segundos}s` : ""}]`;
+      }
+
+      // 🖼️ IMAGEN
+      if (!mensaje && msg.imageMessage) {
+        archivoUrl = msg.imageMessage.url || null;
+        const caption = msg.imageMessage.caption;
+        mensaje = caption || `[Imagen de WhatsApp]`;
+      }
+
+      // 📎 DOCUMENTO
+      if (!mensaje && msg.documentMessage) {
+        archivoUrl = msg.documentMessage.url || null;
+        const fileName = msg.documentMessage.fileName;
+        mensaje = `[Documento: ${fileName || "Archivo"}]`;
+      }
     }
 
     const waMessageId =
@@ -85,6 +127,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
 
     console.log("📞 TELEFONO NORMALIZADO:", telefono);
     console.log("💬 MENSAJE NORMALIZADO:", mensaje);
+    console.log("📎 ARCHIVO URL:", archivoUrl);
     console.log("🙋 NOMBRE:", pushName);
 
     if (!telefono || !mensaje) {
@@ -174,7 +217,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
         `INSERT INTO crm_mensajes
          (conversacion_id, telefono, cuerpo, tipo, origen, wa_message_id, archivo_url)
          VALUES ($1, $2, $3, 'IN', 'whatsapp', $4, $5)`,
-        [conversacionId, telefono, mensaje, waMessageId, null]
+        [conversacionId, telefono, mensaje, waMessageId, archivoUrl]
       );
 
       await client.query("COMMIT");
