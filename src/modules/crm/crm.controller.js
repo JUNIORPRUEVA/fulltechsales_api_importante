@@ -12,25 +12,18 @@ exports.registrarMensajeEntrante = async (req, res) => {
     const raw = req.body || {};
     const data = raw.data || {};
 
-    // ============================================
-    // 0) Solo nos interesan mensajes.upsert
-    // ============================================
+    // 0) Solo nos interesan messages.upsert
     if (raw.event && raw.event !== "messages.upsert") {
       console.log("ℹ️ [CRM v2] Evento no es messages.upsert, ignorado.");
       return res.status(200).json({ ok: true, ignored: true });
     }
 
-    // ============================================
-    // 1) TELEFONO (sacamos solo chats 1 a 1)
-    //    - remoteJid termina en "@s.whatsapp.net"
-    //    - si viene group (@g.us) o @lid => lo ignoramos
-    // ============================================
+    // 1) TELEFONO (solo chats 1 a 1)
     let remoteJid = null;
 
     if (data.key && data.key.remoteJid) {
       remoteJid = data.key.remoteJid;
     } else if (data.participant) {
-      // algunos eventos lo traen aquí
       remoteJid = data.participant;
     } else if (raw.sender) {
       remoteJid = raw.sender;
@@ -56,61 +49,39 @@ exports.registrarMensajeEntrante = async (req, res) => {
       return res.status(200).json({ ok: true, ignored: true });
     }
 
-    // ============================================
     // 2) MENSAJE (texto, caption, audio, reacción...)
-    // ============================================
     const msg = data.message || {};
     let mensaje = null;
 
-    // Texto normal
     if (msg.conversation) {
       mensaje = msg.conversation;
-    }
-    // Texto extendido
-    else if (msg.extendedTextMessage && msg.extendedTextMessage.text) {
+    } else if (msg.extendedTextMessage && msg.extendedTextMessage.text) {
       mensaje = msg.extendedTextMessage.text;
-    }
-    // Imagen con caption
-    else if (msg.imageMessage && msg.imageMessage.caption) {
+    } else if (msg.imageMessage && msg.imageMessage.caption) {
       mensaje = `[Imagen] ${msg.imageMessage.caption}`;
-    }
-    // Video con caption
-    else if (msg.videoMessage && msg.videoMessage.caption) {
+    } else if (msg.videoMessage && msg.videoMessage.caption) {
       mensaje = `[Video] ${msg.videoMessage.caption}`;
-    }
-    // Documento con caption
-    else if (msg.documentMessage && msg.documentMessage.caption) {
+    } else if (msg.documentMessage && msg.documentMessage.caption) {
       mensaje = `[Documento] ${msg.documentMessage.caption}`;
-    }
-    // Audio (nota de voz)
-    else if (msg.audioMessage) {
+    } else if (msg.audioMessage) {
       mensaje = "[Audio de WhatsApp]";
-    }
-    // Reacción
-    else if (msg.reactionMessage && msg.reactionMessage.text) {
+    } else if (msg.reactionMessage && msg.reactionMessage.text) {
       mensaje = `[Reacción] ${msg.reactionMessage.text}`;
     }
 
-    // Si aun así no hay nada, dejamos un placeholder
     const mensajeFinal = mensaje || "[Mensaje sin texto]";
 
     console.log("👉 [CRM v2] remoteJid:", remoteJid);
     console.log("👉 [CRM v2] TELEFONO:", telefono);
     console.log("👉 [CRM v2] MENSAJE:", mensajeFinal);
 
-    // ============================================
     // 3) waMessageId / nombre
-    // ============================================
     const waMessageId =
-      data.id ||
-      (data.key && data.key.id) ||
-      null;
+      data.id || (data.key && data.key.id) || null;
 
     const pushName = data.pushName || "Cliente WhatsApp";
 
-    // ============================================
     // 4) GUARDAR EN BD
-    // ============================================
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -233,6 +204,7 @@ exports.obtenerConversaciones = async (req, res) => {
 
 // =====================================================
 // 3. LISTAR MENSAJES DE UNA CONVERSACIÓN (por ID de conversación)
+//    Ruta sugerida: GET /crm/conversaciones/:id/mensajes
 // =====================================================
 exports.obtenerMensajes = async (req, res) => {
   const { id } = req.params;
@@ -264,27 +236,116 @@ exports.obtenerMensajes = async (req, res) => {
 
 // =====================================================
 // 4. REGISTRAR MENSAJE SALIENTE DESDE LA APP CRM
+//    Ruta sugerida: POST /crm/mensajes/enviar
+//    Flutter envía: { cliente_id, telefono, mensaje, origen }
 // =====================================================
 exports.enviarMensaje = async (req, res) => {
-  const { conversacion_id, telefono, mensaje, origen } = req.body;
-
-  if (!conversacion_id || !telefono || !mensaje) {
-    return res.status(400).json({ ok: false, error: "Datos incompletos" });
-  }
-
   try {
+    let {
+      cliente_id,
+      conversacion_id,
+      telefono,
+      mensaje,
+      origen,
+    } = req.body;
+
+    if (!mensaje || (!telefono && !cliente_id)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Datos incompletos" });
+    }
+
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
 
+      // 1) Asegurar cliente_id y teléfono
+      if (!cliente_id && telefono) {
+        const cliRes = await client.query(
+          "SELECT id FROM clientes WHERE telefono = $1 LIMIT 1",
+          [telefono]
+        );
+        if (cliRes.rows.length > 0) {
+          cliente_id = cliRes.rows[0].id;
+        }
+      }
+
+      if (!telefono && cliente_id) {
+        const cliRes = await client.query(
+          "SELECT telefono FROM clientes WHERE id = $1 LIMIT 1",
+          [cliente_id]
+        );
+        if (cliRes.rows.length > 0) {
+          telefono = cliRes.rows[0].telefono;
+        }
+      }
+
+      // Si aún no hay cliente, lo creamos rápido
+      if (!cliente_id) {
+        const insertCli = await client.query(
+          `INSERT INTO clientes 
+           (nombre, telefono, email, direccion, tipo, categoria, estado, fecha_creado, usuario_id, synced)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NULL, false)
+           RETURNING id`,
+          [
+            "Cliente CRM",
+            telefono,
+            null,
+            null,
+            "CRM",
+            "WHATSAPP",
+            "NUEVO",
+          ]
+        );
+        cliente_id = insertCli.rows[0].id;
+      }
+
+      // 2) Buscar o crear conversación
+      let conversacionId = conversacion_id;
+
+      if (!conversacionId) {
+        const convRes = await client.query(
+          `SELECT id 
+           FROM crm_conversaciones 
+           WHERE cliente_id = $1 AND telefono = $2
+           LIMIT 1`,
+          [cliente_id, telefono]
+        );
+
+        if (convRes.rows.length === 0) {
+          const convInsert = await client.query(
+            `INSERT INTO crm_conversaciones
+             (cliente_id, telefono, nombre, estado, ultimo_mensaje, ultimo_mensaje_tipo, ultimo_mensaje_fecha, creado_en, actualizado_en)
+             VALUES (
+               $1,
+               $2,
+               (SELECT nombre FROM clientes WHERE id = $1),
+               'EN_PROCESO',
+               $3,
+               'OUT',
+               NOW(),
+               NOW(),
+               NOW()
+             )
+             RETURNING id`,
+            [cliente_id, telefono, mensaje]
+          );
+          conversacionId = convInsert.rows[0].id;
+        } else {
+          conversacionId = convRes.rows[0].id;
+        }
+      }
+
+      // 3) Insertar mensaje OUT
       const insertMsg = await client.query(
         `INSERT INTO crm_mensajes
          (conversacion_id, telefono, cuerpo, tipo, origen)
          VALUES ($1, $2, $3, 'OUT', $4)
-         RETURNING *`,
-        [conversacion_id, telefono, mensaje, origen || "crm_app"]
+         RETURNING id, conversacion_id, telefono, cuerpo, tipo, origen, fecha`,
+        [conversacionId, telefono, mensaje, origen || "crm_app"]
       );
 
+      // 4) Actualizar resumen de conversación
       await client.query(
         `UPDATE crm_conversaciones
          SET ultimo_mensaje = $1,
@@ -292,12 +353,18 @@ exports.enviarMensaje = async (req, res) => {
              ultimo_mensaje_fecha = NOW(),
              actualizado_en = NOW()
          WHERE id = $2`,
-        [mensaje, conversacion_id]
+        [mensaje, conversacionId]
       );
 
       await client.query("COMMIT");
 
-      return res.json({ ok: true, mensaje: insertMsg.rows[0] });
+      return res.json({
+        ok: true,
+        mensaje: insertMsg.rows[0],
+        conversacion_id: conversacionId,
+        cliente_id,
+        telefono,
+      });
     } catch (err) {
       await client.query("ROLLBACK");
       console.error("🔥 Error enviarMensaje:", err);
@@ -313,6 +380,7 @@ exports.enviarMensaje = async (req, res) => {
 
 // =====================================================
 // 5. LISTAR CLIENTES PARA EL CRM (formato que espera Flutter)
+//    Ruta sugerida: GET /crm/clientes
 // =====================================================
 exports.obtenerClientesCRM = async (req, res) => {
   try {
@@ -340,6 +408,7 @@ exports.obtenerClientesCRM = async (req, res) => {
 
 // =====================================================
 // 6. LISTAR MENSAJES POR CLIENTE (cliente_id)
+//    Ruta que Flutter ya usa: GET /crm/clientes/:clienteId/mensajes
 // =====================================================
 exports.obtenerMensajesPorClienteId = async (req, res) => {
   const { clienteId } = req.params;
