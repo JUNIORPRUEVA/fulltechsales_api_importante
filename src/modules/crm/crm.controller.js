@@ -5,11 +5,13 @@ const { pool } = require("../../db");
 // 1. WEBHOOK: mensaje entrante desde Evolution / WhatsApp
 // =====================================================
 exports.registrarMensajeEntrante = async (req, res) => {
-  console.log("📩 WEBHOOK RECIBIDO CRM:", JSON.stringify(req.body, null, 2));
-
-  const data = req.body;
-
   try {
+    console.log("📩 WEBHOOK RECIBIDO CRM RAW:", JSON.stringify(req.body, null, 2));
+
+    // Evolution normalmente manda { event, instanceId, data: { ... } }
+    const raw = req.body;
+    const data = raw.data || raw; // 👈 Soportamos Evolution y Postman
+
     // -------------------------------
     // 1) Normalizar teléfono
     // -------------------------------
@@ -24,6 +26,15 @@ exports.registrarMensajeEntrante = async (req, res) => {
 
     if (!telefono && remoteJid) {
       telefono = remoteJid.replace(/@.*/, ""); // quita @s.whatsapp.net
+    }
+
+    // muchos Evolution mandan un array messages
+    if (!telefono && Array.isArray(data.messages) && data.messages.length > 0) {
+      const m = data.messages[0];
+      if (m.key?.remoteJid) {
+        remoteJid = m.key.remoteJid;
+        telefono = remoteJid.replace(/@.*/, "");
+      }
     }
 
     // si viene con 11 dígitos tipo 1XXXXXXXXXX, quitamos el 1 inicial
@@ -50,29 +61,31 @@ exports.registrarMensajeEntrante = async (req, res) => {
         m.message ||
         m.body ||
         null;
+    }
 
-      if (!remoteJid && m.key?.remoteJid) {
-        remoteJid = m.key.remoteJid;
-        telefono = remoteJid.replace(/@.*/, "");
-        if (telefono.length === 11 && telefono.startsWith("1")) {
-          telefono = telefono.substring(1);
-        }
-      }
+    // otros formatos típicos
+    if (!mensaje && data.message?.conversation) {
+      mensaje = data.message.conversation;
+    }
+    if (!mensaje && data.message?.extendedTextMessage?.text) {
+      mensaje = data.message.extendedTextMessage.text;
     }
 
     const waMessageId =
       data.messageId ||
       data.id ||
-      (Array.isArray(data.messages) &&
-        data.messages[0]?.key?.id) ||
+      (Array.isArray(data.messages) && data.messages[0]?.key?.id) ||
       null;
 
     const pushName =
       data.pushName ||
       data.name ||
-      (Array.isArray(data.messages) &&
-        data.messages[0]?.pushName) ||
+      (Array.isArray(data.messages) && data.messages[0]?.pushName) ||
       null;
+
+    console.log("📞 TELEFONO NORMALIZADO:", telefono);
+    console.log("💬 MENSAJE NORMALIZADO:", mensaje);
+    console.log("🙋 NOMBRE:", pushName);
 
     if (!telefono || !mensaje) {
       console.log("⚠️ Webhook ignorado: falta teléfono o mensaje.");
@@ -241,8 +254,6 @@ exports.obtenerMensajes = async (req, res) => {
 
 // =====================================================
 // 4. REGISTRAR MENSAJE SALIENTE DESDE LA APP CRM
-//    (la app ya lo envió por EvolutionService; aquí solo
-//     lo guardamos en la base para tener historial)
 // =====================================================
 exports.enviarMensaje = async (req, res) => {
   const { conversacion_id, telefono, mensaje, origen } = req.body;
@@ -289,6 +300,7 @@ exports.enviarMensaje = async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error general" });
   }
 };
+
 // =====================================================
 // 5. LISTAR CLIENTES PARA EL CRM (formato que espera Flutter)
 // =====================================================
