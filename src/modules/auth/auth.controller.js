@@ -153,7 +153,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
 
       console.log("✅ [CRM v2] Mensaje IN guardado en CRM");
 
-      // 4.4 EMITIR EVENTO EN TIEMPO REAL
+      // 4.4 EMITIR EVENTO EN TIEMPO REAL (ENTRANTE)
       const io = req.app.get("io");
       if (io) {
         io.emit("crm:nuevo_mensaje_in", {
@@ -210,7 +210,7 @@ exports.obtenerConversaciones = async (req, res) => {
 };
 
 // =====================================================
-// 3. LISTAR MENSAJES DE UNA CONVERSACIÓN
+// 3. LISTAR MENSAJES DE UNA CONVERSACIÓN (por id)
 // =====================================================
 exports.obtenerMensajes = async (req, res) => {
   const { id } = req.params;
@@ -280,6 +280,7 @@ exports.enviarMensaje = async (req, res) => {
         }
       }
 
+      // Si aún no hay cliente, lo creamos rápido
       if (!cliente_id) {
         const insertCli = await client.query(
           `INSERT INTO clientes 
@@ -336,7 +337,7 @@ exports.enviarMensaje = async (req, res) => {
         [conversacionId, telefono, mensaje, origen || "crm_app"]
       );
 
-      // 4) Actualizar conversación
+      // 4) Actualizar resumen conversación
       await client.query(
         `UPDATE crm_conversaciones
          SET ultimo_mensaje = $1,
@@ -349,7 +350,7 @@ exports.enviarMensaje = async (req, res) => {
 
       await client.query("COMMIT");
 
-      // 5) EMITIR EVENTO EN TIEMPO REAL (OUT)
+      // 5) EMITIR EVENTO EN TIEMPO REAL (SALIENTE)
       const io = req.app.get("io");
       if (io) {
         io.emit("crm:nuevo_mensaje_out", {
@@ -411,7 +412,7 @@ exports.obtenerClientesCRM = async (req, res) => {
 };
 
 // =====================================================
-// 6. LISTAR MENSAJES POR CLIENTE
+// 6. LISTAR MENSAJES POR CLIENTE (cliente_id)
 // =====================================================
 exports.obtenerMensajesPorClienteId = async (req, res) => {
   const { clienteId } = req.params;
