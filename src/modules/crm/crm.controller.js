@@ -11,12 +11,22 @@ exports.registrarMensajeEntrante = async (req, res) => {
       JSON.stringify(req.body, null, 2)
     );
 
-    // Evolution puede mandar:
-    // { event, instanceId, data: {...}, sender, ... }
-    // o bien: { result: { event, instanceId, data: {...} }, sender, ... }
     const raw = req.body;
-    const wrapper = raw.result || raw; // 👈 soporta ambos formatos
-    const data = wrapper.data || wrapper;
+
+    // Evolution te está mandando:
+    // {
+    //   event: "messages.upsert",
+    //   instance: "fulltech",
+    //   data: { key: { remoteJid }, pushName, message, ... },
+    //   sender: "1829xxxxxxxx@s.whatsapp.net",
+    //   ...
+    // }
+    //
+    // Pero dejamos flexible por si mañana cambia algo.
+    let data =
+      raw.data ||
+      (raw.result && raw.result.data) ||
+      raw; // fallback paranoico
 
     // -------------------------------
     // 1) Normalizar teléfono
@@ -26,7 +36,6 @@ exports.registrarMensajeEntrante = async (req, res) => {
       data.remoteJID ||
       data.from ||
       (data.key && data.key.remoteJid) ||
-      wrapper.sender || // en tus logs viene aquí
       raw.sender ||
       null;
 
@@ -36,22 +45,16 @@ exports.registrarMensajeEntrante = async (req, res) => {
       telefono = remoteJid.replace(/@.*/, ""); // quita @s.whatsapp.net
     }
 
-    // muchos Evolution mandan un array messages
-    if (!telefono && Array.isArray(data.messages) && data.messages.length > 0) {
-      const m = data.messages[0];
-      if (m.key?.remoteJid) {
-        remoteJid = m.key.remoteJid;
-        telefono = remoteJid.replace(/@.*/, "");
-      }
-    }
-
-    // si viene con 11 dígitos tipo 1XXXXXXXXXX, quitamos el 1 inicial
+    // Si viene con 11 dígitos tipo 1829XXXXXXX, puedes:
+    // - mantener 11 (formato internacional)
+    // - o quitar el "1" para guardar 10 dígitos (829XXXXXXX)
+    // Por ahora dejamos igual que antes: quitar el 1 inicial
     if (telefono && telefono.length === 11 && telefono.startsWith("1")) {
       telefono = telefono.substring(1);
     }
 
     // -------------------------------
-    // 2) Normalizar mensaje y archivo
+    // 2) Normalizar mensaje + archivo
     // -------------------------------
     let mensaje =
       data.text ||
@@ -61,18 +64,18 @@ exports.registrarMensajeEntrante = async (req, res) => {
 
     let archivoUrl = null;
 
-    // Objeto de mensaje principal (según formato Evolution/Baileys)
+    // Mensaje "principal"
     let msgPrimary = null;
 
     if (data.message) {
+      // caso típico: data.message = { conversation: "Hola", ... }
       msgPrimary = data.message;
     } else if (
       Array.isArray(data.messages) &&
-      data.messages.length > 0 &&
-      data.messages[0].message
+      data.messages.length > 0
     ) {
-      msgPrimary = data.messages[0].message;
-      // por si también viene remoteJid ahí
+      // algunos formatos traen data.messages[0].message
+      msgPrimary = data.messages[0].message || data.messages[0];
       if (!remoteJid && data.messages[0].key?.remoteJid) {
         remoteJid = data.messages[0].key.remoteJid;
         telefono = remoteJid.replace(/@.*/, "");
@@ -82,7 +85,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
       }
     }
 
-    // Texto puro: conversation / extendedTextMessage
+    // Texto normal
     if (!mensaje && msgPrimary?.conversation) {
       mensaje = msgPrimary.conversation;
     }
@@ -90,7 +93,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
       mensaje = msgPrimary.extendedTextMessage.text;
     }
 
-    // 🖼️ Imagen
+    // Imagen
     if (msgPrimary?.imageMessage) {
       archivoUrl = msgPrimary.imageMessage.url || null;
       const caption = msgPrimary.imageMessage.caption;
@@ -99,7 +102,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
       }
     }
 
-    // 🎧 Audio
+    // Audio
     if (msgPrimary?.audioMessage) {
       archivoUrl = msgPrimary.audioMessage.url || null;
       const segundos = msgPrimary.audioMessage.seconds;
@@ -111,7 +114,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
       }
     }
 
-    // 📎 Documento
+    // Documento
     if (msgPrimary?.documentMessage) {
       archivoUrl = msgPrimary.documentMessage.url || null;
       const fileName = msgPrimary.documentMessage.fileName;
@@ -132,12 +135,13 @@ exports.registrarMensajeEntrante = async (req, res) => {
       (Array.isArray(data.messages) && data.messages[0]?.pushName) ||
       null;
 
+    console.log("🔍 remoteJid bruto:", remoteJid);
     console.log("📞 TELEFONO NORMALIZADO:", telefono);
     console.log("💬 MENSAJE NORMALIZADO:", mensaje);
     console.log("📎 ARCHIVO URL:", archivoUrl);
     console.log("🙋 NOMBRE:", pushName);
 
-    // si aún no pudimos sacar teléfono o mensaje, ignoramos
+    // Si NO hay teléfono o NO hay mensaje → no hacemos nada
     if (!telefono || !mensaje) {
       console.log("⚠️ Webhook ignorado: falta teléfono o mensaje.");
       return res.status(200).json({ ok: true, ignored: true });
