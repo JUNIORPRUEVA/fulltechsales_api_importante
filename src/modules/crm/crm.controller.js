@@ -236,30 +236,40 @@ exports.obtenerMensajes = async (req, res) => {
 
 // =====================================================
 // 4. REGISTRAR MENSAJE SALIENTE DESDE LA APP CRM
-//    Ruta sugerida: POST /crm/mensajes/enviar
-//    Flutter envía: { cliente_id, telefono, mensaje, origen }
+//    (ENVÍA POR EVOLUTION + GUARDA EN BD + EMITE SOCKET)
 // =====================================================
 exports.enviarMensaje = async (req, res) => {
   try {
-    let {
-      cliente_id,
-      conversacion_id,
-      telefono,
-      mensaje,
-      origen,
-    } = req.body;
+    // 🔍 LOG: ver exactamente qué está llegando desde Flutter
+    console.log("📨 [CRM v2] enviarMensaje BODY:", JSON.stringify(req.body, null, 2));
 
-    if (!mensaje || (!telefono && !cliente_id)) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Datos incompletos" });
+    let { cliente_id, conversacion_id, telefono, mensaje, origen } = req.body || {};
+
+    // Normalizamos tipos por si vienen como string
+    if (cliente_id !== undefined && cliente_id !== null) {
+      cliente_id = Number(cliente_id);
+      if (Number.isNaN(cliente_id)) cliente_id = null;
+    }
+    if (conversacion_id !== undefined && conversacion_id !== null) {
+      conversacion_id = Number(conversacion_id);
+      if (Number.isNaN(conversacion_id)) conversacion_id = null;
+    }
+
+    // Solo validamos que haya mensaje con texto
+    if (!mensaje || String(mensaje).trim() === "") {
+      return res.status(400).json({
+        ok: false,
+        error: "Mensaje vacío",
+      });
     }
 
     const client = await pool.connect();
+    let conversacionId;
+
     try {
       await client.query("BEGIN");
 
-      // 1) Asegurar cliente_id y teléfono
+      // 1) Asegurar cliente_id y teléfono (intentamos completar todo en BD)
       if (!cliente_id && telefono) {
         const cliRes = await client.query(
           "SELECT id FROM clientes WHERE telefono = $1 LIMIT 1",
@@ -280,28 +290,34 @@ exports.enviarMensaje = async (req, res) => {
         }
       }
 
-      // Si aún no hay cliente, lo creamos rápido
-      if (!cliente_id) {
+      // Si aún no hay cliente, lo creamos rápido con el teléfono que llega
+      if (!cliente_id && telefono) {
         const insertCli = await client.query(
           `INSERT INTO clientes 
            (nombre, telefono, email, direccion, tipo, categoria, estado, fecha_creado, usuario_id, synced)
            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NULL, false)
            RETURNING id`,
-          [
-            "Cliente CRM",
-            telefono,
-            null,
-            null,
-            "CRM",
-            "WHATSAPP",
-            "NUEVO",
-          ]
+          ["Cliente CRM", telefono, null, null, "CRM", "WHATSAPP", "NUEVO"]
         );
         cliente_id = insertCli.rows[0].id;
       }
 
+      // Si a esta altura NO tenemos teléfono, no podemos enviar WhatsApp
+      if (!telefono) {
+        await client.query("ROLLBACK");
+        console.error(
+          "🔥 [CRM v2] No se pudo determinar teléfono para enviar mensaje.",
+          { cliente_id, conversacion_id }
+        );
+        return res.status(400).json({
+          ok: false,
+          error: "No se pudo determinar el teléfono del cliente",
+          detalle: { cliente_id, conversacion_id },
+        });
+      }
+
       // 2) Buscar o crear conversación
-      let conversacionId = conversacion_id;
+      conversacionId = conversacion_id;
 
       if (!conversacionId) {
         const convRes = await client.query(
@@ -336,7 +352,10 @@ exports.enviarMensaje = async (req, res) => {
         }
       }
 
-      // 3) Insertar mensaje OUT
+      // 3) ENVIAR POR WHATSAPP (EVOLUTION)
+      await enviarWhatsAppTexto(telefono, mensaje);
+
+      // 4) Insertar mensaje OUT en BD
       const insertMsg = await client.query(
         `INSERT INTO crm_mensajes
          (conversacion_id, telefono, cuerpo, tipo, origen)
@@ -345,7 +364,7 @@ exports.enviarMensaje = async (req, res) => {
         [conversacionId, telefono, mensaje, origen || "crm_app"]
       );
 
-      // 4) Actualizar resumen de conversación
+      // 5) Actualizar resumen conversación
       await client.query(
         `UPDATE crm_conversaciones
          SET ultimo_mensaje = $1,
@@ -358,6 +377,20 @@ exports.enviarMensaje = async (req, res) => {
 
       await client.query("COMMIT");
 
+      // 6) EMITIR EVENTO EN TIEMPO REAL (SALIENTE)
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("crm:nuevo_mensaje_out", {
+          tipo: "OUT",
+          telefono,
+          clienteId: cliente_id,
+          conversacionId,
+          cuerpo: mensaje,
+          fecha: insertMsg.rows[0].fecha,
+          origen: origen || "crm_app",
+        });
+      }
+
       return res.json({
         ok: true,
         mensaje: insertMsg.rows[0],
@@ -368,7 +401,7 @@ exports.enviarMensaje = async (req, res) => {
     } catch (err) {
       await client.query("ROLLBACK");
       console.error("🔥 Error enviarMensaje:", err);
-      return res.status(500).json({ ok: false, error: "Error interno" });
+      return res.status(500).json({ ok: false, error: err.message });
     } finally {
       client.release();
     }
