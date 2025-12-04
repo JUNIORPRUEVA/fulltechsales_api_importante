@@ -295,10 +295,22 @@ exports.obtenerMensajes = async (req, res) => {
 // =====================================================
 // 4. REGISTRAR MENSAJE SALIENTE DESDE LA APP CRM
 //    (ENVÍA POR EVOLUTION + GUARDA EN BD + EMITE SOCKET)
+//    Soporta:
+//    - POST /crm/mensajes/enviar
+//    - POST /crm/clientes/:clienteId/mensajes
 // =====================================================
 exports.enviarMensaje = async (req, res) => {
   try {
+    // si viene /crm/clientes/:clienteId/mensajes lo tomamos de params
+    const clienteIdParam = req.params.clienteId;
     let { cliente_id, conversacion_id, telefono, mensaje, origen } = req.body;
+
+    if (!cliente_id && clienteIdParam) {
+      const parsed = parseInt(clienteIdParam, 10);
+      if (!isNaN(parsed)) {
+        cliente_id = parsed;
+      }
+    }
 
     if (!mensaje || (!telefono && !cliente_id)) {
       return res
