@@ -1,30 +1,36 @@
+// src/modules/crm/crm.routes.js
 const express = require("express");
 const router = express.Router();
-const controller = require("./auth.controller");
+const controller = require("./crm.controller");
 
-// =======================
-// AUTH BÁSICO
-// =======================
-router.post("/register", controller.register);
-router.post("/login", controller.login);
+// =======================================
+//  WEBHOOK DESDE EVOLUTION / WHATSAPP
+// =======================================
+router.post("/webhook", controller.registrarMensajeEntrante);
 
-// =======================
-// CRUD DE USUARIOS
-// =======================
+// =======================================
+//  CONVERSACIONES (si luego las usas en la app)
+// =======================================
+router.get("/conversaciones", controller.obtenerConversaciones);
+router.get("/conversaciones/:id/mensajes", controller.obtenerMensajes);
 
-// Listar todos
-router.get("/usuarios", controller.obtenerUsuarios);
+// =======================================
+//  CLIENTES PARA EL CRM (lo que usa Flutter)
+// =======================================
+router.get("/clientes", controller.obtenerClientesCRM);
 
-// Detalle por ID
-router.get("/usuarios/:id", controller.obtenerUsuarioPorId);
+router.get(
+  "/clientes/:clienteId/mensajes",
+  controller.obtenerMensajesPorClienteId
+);
 
-// Actualizar datos
-router.put("/usuarios/:id", controller.actualizarUsuario);
+// 👉 donde pega Flutter al enviar mensaje desde el chat
+router.post(
+  "/clientes/:clienteId/mensajes",
+  controller.enviarMensaje
+);
 
-// Eliminar usuario
-router.delete("/usuarios/:id", controller.eliminarUsuario);
-
-// Bloquear / activar
-router.patch("/usuarios/:id/bloqueo", controller.cambiarEstadoActivo);
+// También puedes seguir usando la ruta genérica si quieres:
+router.post("/mensajes/enviar", controller.enviarMensaje);
 
 module.exports = router;
