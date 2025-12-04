@@ -12,12 +12,12 @@ const server = http.createServer(app);
 // Crear instancia de Socket.IO
 const io = new Server(server, {
   cors: {
-    origin: '*',
+    origin: '*',              // 👈 Flutter desktop / web / móvil sin problema
     methods: ['GET', 'POST'],
   },
 });
 
-// Guardamos io dentro de app para usarlo en los controllers
+// Guardamos io dentro de app para usarlo en los controllers (CRM, etc.)
 app.set('io', io);
 
 // Eventos básicos de conexión
@@ -31,4 +31,5 @@ io.on('connection', (socket) => {
 
 server.listen(PORT, () => {
   console.log(`🚀 Servidor FULLPOS API corriendo en puerto ${PORT}`);
+  console.log('📡 Socket.IO listo para CRM (eventos crm:nuevo_mensaje_in / crm:nuevo_mensaje_out)');
 });
