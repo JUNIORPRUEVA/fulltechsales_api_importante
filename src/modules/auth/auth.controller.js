@@ -1,5 +1,57 @@
 // src/modules/crm/crm.controller.js
 const { pool } = require("../../db");
+const axios = require("axios");
+
+// ===============================================
+// CONFIG EVOLUTION API (desde .env)
+// ===============================================
+const EVOLUTION_BASE_URL = process.env.EVOLUTION_BASE_URL || "";
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || "";
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || "default";
+
+/**
+ * Envía un mensaje de texto por Evolution (WhatsApp).
+ * Lanza error si falta config o si Evolution responde mal.
+ */
+async function enviarWhatsAppTexto(telefono, mensaje) {
+  if (!EVOLUTION_BASE_URL || !EVOLUTION_API_KEY) {
+    console.warn(
+      "⚠️ EVOLUTION no configurado (EVOLUTION_BASE_URL / EVOLUTION_API_KEY)."
+    );
+    throw new Error("Evolution API no configurada");
+  }
+
+  const url = `${EVOLUTION_BASE_URL}/message/sendText/${EVOLUTION_INSTANCE}`;
+
+  const payload = {
+    number: telefono,
+    text: mensaje,
+  };
+
+  const headers = {
+    "Content-Type": "application/json",
+    apikey: EVOLUTION_API_KEY,
+  };
+
+  console.log("📤 Enviando WhatsApp via Evolution:", {
+    url,
+    number: telefono,
+    text: mensaje,
+  });
+
+  const res = await axios.post(url, payload, { headers });
+
+  if (res.status < 200 || res.status >= 300) {
+    console.error(
+      "🔥 Evolution respondió error:",
+      res.status,
+      res.data || res.statusText
+    );
+    throw new Error("Error al enviar mensaje por Evolution");
+  }
+
+  console.log("✅ Mensaje enviado por Evolution OK");
+}
 
 // =====================================================
 // 1. WEBHOOK: mensaje entrante desde Evolution / WhatsApp
@@ -140,7 +192,7 @@ exports.registrarMensajeEntrante = async (req, res) => {
         );
       }
 
-      // 4.3 Insertar mensaje
+      // 4.3 Insertar mensaje IN
       const insertMsg = await client.query(
         `INSERT INTO crm_mensajes
          (conversacion_id, telefono, cuerpo, tipo, origen, wa_message_id, archivo_url)
@@ -242,6 +294,7 @@ exports.obtenerMensajes = async (req, res) => {
 
 // =====================================================
 // 4. REGISTRAR MENSAJE SALIENTE DESDE LA APP CRM
+//    (ENVÍA POR EVOLUTION + GUARDA EN BD + EMITE SOCKET)
 // =====================================================
 exports.enviarMensaje = async (req, res) => {
   try {
@@ -328,7 +381,10 @@ exports.enviarMensaje = async (req, res) => {
         }
       }
 
-      // 3) Insertar mensaje OUT
+      // 3) ENVIAR POR WHATSAPP (EVOLUTION)
+      await enviarWhatsAppTexto(telefono, mensaje);
+
+      // 4) Insertar mensaje OUT en BD
       const insertMsg = await client.query(
         `INSERT INTO crm_mensajes
          (conversacion_id, telefono, cuerpo, tipo, origen)
@@ -337,7 +393,7 @@ exports.enviarMensaje = async (req, res) => {
         [conversacionId, telefono, mensaje, origen || "crm_app"]
       );
 
-      // 4) Actualizar resumen conversación
+      // 5) Actualizar resumen conversación
       await client.query(
         `UPDATE crm_conversaciones
          SET ultimo_mensaje = $1,
@@ -350,7 +406,7 @@ exports.enviarMensaje = async (req, res) => {
 
       await client.query("COMMIT");
 
-      // 5) EMITIR EVENTO EN TIEMPO REAL (SALIENTE)
+      // 6) EMITIR EVENTO EN TIEMPO REAL (SALIENTE)
       const io = req.app.get("io");
       if (io) {
         io.emit("crm:nuevo_mensaje_out", {
@@ -374,7 +430,7 @@ exports.enviarMensaje = async (req, res) => {
     } catch (err) {
       await client.query("ROLLBACK");
       console.error("🔥 Error enviarMensaje:", err);
-      return res.status(500).json({ ok: false, error: "Error interno" });
+      return res.status(500).json({ ok: false, error: err.message });
     } finally {
       client.release();
     }
