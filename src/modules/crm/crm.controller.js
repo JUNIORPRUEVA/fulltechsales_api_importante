@@ -1,5 +1,7 @@
 // src/modules/crm/crm.controller.js
 const { pool } = require("../../db");
+// Si tienes este helper en otro archivo, impórtalo así:
+// const { enviarWhatsAppTexto } = require("../evolution/evolution.service");
 
 // =====================================================
 // 1. WEBHOOK: mensaje entrante desde Evolution / WhatsApp
@@ -204,7 +206,7 @@ exports.obtenerConversaciones = async (req, res) => {
 
 // =====================================================
 // 3. LISTAR MENSAJES DE UNA CONVERSACIÓN (por ID de conversación)
-//    Ruta sugerida: GET /crm/conversaciones/:id/mensajes
+//    Ruta: GET /crm/conversaciones/:id/mensajes
 // =====================================================
 exports.obtenerMensajes = async (req, res) => {
   const { id } = req.params;
@@ -237,13 +239,18 @@ exports.obtenerMensajes = async (req, res) => {
 // =====================================================
 // 4. REGISTRAR MENSAJE SALIENTE DESDE LA APP CRM
 //    (ENVÍA POR EVOLUTION + GUARDA EN BD + EMITE SOCKET)
+//    Ruta: POST /crm/mensajes/enviar
 // =====================================================
 exports.enviarMensaje = async (req, res) => {
   try {
     // 🔍 LOG: ver exactamente qué está llegando desde Flutter
-    console.log("📨 [CRM v2] enviarMensaje BODY:", JSON.stringify(req.body, null, 2));
+    console.log(
+      "📨 [CRM v2] enviarMensaje BODY:",
+      JSON.stringify(req.body, null, 2)
+    );
 
-    let { cliente_id, conversacion_id, telefono, mensaje, origen } = req.body || {};
+    let { cliente_id, conversacion_id, telefono, mensaje, origen } =
+      req.body || {};
 
     // Normalizamos tipos por si vienen como string
     if (cliente_id !== undefined && cliente_id !== null) {
@@ -255,13 +262,14 @@ exports.enviarMensaje = async (req, res) => {
       if (Number.isNaN(conversacion_id)) conversacion_id = null;
     }
 
-    // Solo validamos que haya mensaje con texto
+    // Validar texto
     if (!mensaje || String(mensaje).trim() === "") {
       return res.status(400).json({
         ok: false,
         error: "Mensaje vacío",
       });
     }
+    mensaje = String(mensaje).trim();
 
     const client = await pool.connect();
     let conversacionId;
@@ -269,7 +277,7 @@ exports.enviarMensaje = async (req, res) => {
     try {
       await client.query("BEGIN");
 
-      // 1) Asegurar cliente_id y teléfono (intentamos completar todo en BD)
+      // 1) Asegurar cliente_id y teléfono
       if (!cliente_id && telefono) {
         const cliRes = await client.query(
           "SELECT id FROM clientes WHERE telefono = $1 LIMIT 1",
@@ -290,7 +298,7 @@ exports.enviarMensaje = async (req, res) => {
         }
       }
 
-      // Si aún no hay cliente, lo creamos rápido con el teléfono que llega
+      // Si aún no hay cliente, lo creamos rápido
       if (!cliente_id && telefono) {
         const insertCli = await client.query(
           `INSERT INTO clientes 
@@ -353,6 +361,7 @@ exports.enviarMensaje = async (req, res) => {
       }
 
       // 3) ENVIAR POR WHATSAPP (EVOLUTION)
+      // 👇 Asegúrate de tener implementado este helper
       await enviarWhatsAppTexto(telefono, mensaje);
 
       // 4) Insertar mensaje OUT en BD
@@ -413,7 +422,7 @@ exports.enviarMensaje = async (req, res) => {
 
 // =====================================================
 // 5. LISTAR CLIENTES PARA EL CRM (formato que espera Flutter)
-//    Ruta sugerida: GET /crm/clientes
+//    Ruta: GET /crm/clientes
 // =====================================================
 exports.obtenerClientesCRM = async (req, res) => {
   try {
@@ -441,7 +450,7 @@ exports.obtenerClientesCRM = async (req, res) => {
 
 // =====================================================
 // 6. LISTAR MENSAJES POR CLIENTE (cliente_id)
-//    Ruta que Flutter ya usa: GET /crm/clientes/:clienteId/mensajes
+//    Ruta: GET /crm/clientes/:clienteId/mensajes
 // =====================================================
 exports.obtenerMensajesPorClienteId = async (req, res) => {
   const { clienteId } = req.params;
